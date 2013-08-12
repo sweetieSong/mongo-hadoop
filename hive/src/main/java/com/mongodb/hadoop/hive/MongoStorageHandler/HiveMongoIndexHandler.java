@@ -34,10 +34,25 @@ public class HiveMongoIndexHandler extends AbstractIndexHandler {
     public void analyzeIndexDefinition(Table baseTable, 
             Index index, Table indexTable)
             throws HiveException {
+        LOG.warn("entered analyze");
         Map<String, String> tblParams = baseTable.getParameters();
         if (!tblParams.containsKey(MongoStorageHandler.MONGO_URI)) {
             throw new HiveException("You must specify a 'mongo.uri' in TBLPROPERTIES");
         }
+        StorageDescriptor storageDesc = index.getSd();
+        if (this.usesIndexTable() && indexTable != null) {
+            StorageDescriptor indexTableSd = storageDesc.deepCopy();
+            List<FieldSchema> indexTblCols = indexTableSd.getCols();
+            FieldSchema bucketFileName = new FieldSchema("_bucketname", "string", "");
+            indexTblCols.add(bucketFileName);
+            FieldSchema offSets = new FieldSchema("_offset", "bigint", "");
+            indexTblCols.add(offSets);
+            indexTable.setSd(indexTableSd);
+        }
+
+        createMongoIndex(baseTable, index);
+
+        LOG.warn("exited analyze");
     }
 
     @Override
@@ -49,15 +64,11 @@ public class HiveMongoIndexHandler extends AbstractIndexHandler {
             org.apache.hadoop.hive.ql.metadata.Table indexTable,
             Set<ReadEntity> inputs, 
             Set<WriteEntity> outputs) throws HiveException {
+        LOG.warn("entered generate");
 
-        Map<String, String> tblParams = baseTable.getParameters();
-        String mongoURIStr = tblParams.get(MongoStorageHandler.MONGO_URI);
-        DBCollection coll = MongoConfigUtil.getCollection(new MongoURI(mongoURIStr));
+        createMongoIndex(baseTable, index);
         
-        for (FieldSchema schema : index.getSd().getCols()) {
-            coll.createIndex(new BasicDBObject(schema.getName(), 1));
-        }
-        
+        LOG.warn("exited generate");
         return new ArrayList<Task<?>>();
     }
 
@@ -70,7 +81,7 @@ public class HiveMongoIndexHandler extends AbstractIndexHandler {
 
     @Override
     public boolean usesIndexTable() {
-        return false;
+        return true;
     }
 
     @Override
@@ -81,6 +92,22 @@ public class HiveMongoIndexHandler extends AbstractIndexHandler {
     @Override
     public void setConf(Configuration conf) {
         configuration = conf;
+    }
+
+    private void createMongoIndex(Object baseTable, Index index) throws HiveException {
+        Map<String, String> tblParams;
+        if (baseTable instanceof org.apache.hadoop.hive.ql.metadata.Table) {
+            tblParams = ((org.apache.hadoop.hive.ql.metadata.Table) baseTable).getParameters();
+        } else {
+            tblParams = ((Table) baseTable).getParameters();
+        }
+        String mongoURIStr = tblParams.get(MongoStorageHandler.MONGO_URI);
+        DBCollection coll = MongoConfigUtil.getCollection(new MongoURI(mongoURIStr));
+        LOG.warn("got mongo collection");
+        
+        for (FieldSchema schema : index.getSd().getCols()) {
+            coll.createIndex(new BasicDBObject(schema.getName(), 1));
+        }
     }
 
 }
