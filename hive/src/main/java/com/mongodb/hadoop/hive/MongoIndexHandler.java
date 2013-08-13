@@ -3,6 +3,7 @@ package com.mongodb.hadoop.hive;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Set;
 
 import org.apache.commons.logging.Log;
@@ -19,10 +20,16 @@ import org.apache.hadoop.hive.ql.metadata.Partition;
 import org.apache.hadoop.hive.ql.parse.ParseContext;
 import org.apache.hadoop.hive.ql.plan.ExprNodeDesc;
 
+import com.mongodb.DBObject;
 import com.mongodb.BasicDBObject;
+import com.mongodb.BasicDBObjectBuilder;
 import com.mongodb.DBCollection;
 import com.mongodb.MongoURI;
 import com.mongodb.hadoop.util.MongoConfigUtil;
+/**
+ * The MongIndexHandler will create a MongoDB index for every index
+ * created in Hive
+ */
 
 public class MongoIndexHandler extends AbstractIndexHandler {
 
@@ -34,7 +41,6 @@ public class MongoIndexHandler extends AbstractIndexHandler {
     public void analyzeIndexDefinition(Table baseTable, 
             Index index, Table indexTable)
             throws HiveException {
-        LOG.warn("entered analyze");
         Map<String, String> tblParams = baseTable.getParameters();
         if (!tblParams.containsKey(MongoStorageHandler.MONGO_URI)) {
             throw new HiveException("You must specify a 'mongo.uri' in TBLPROPERTIES");
@@ -51,10 +57,12 @@ public class MongoIndexHandler extends AbstractIndexHandler {
         }
 
         createMongoIndex(baseTable, index);
-
-        LOG.warn("exited analyze");
     }
 
+    /**
+     * MongoDB indices are updates automatically, there's no need for 
+     * deferred rebuilds
+     */
     @Override
     public List<Task<?>> generateIndexBuildTaskList(
             org.apache.hadoop.hive.ql.metadata.Table baseTable, 
@@ -64,11 +72,7 @@ public class MongoIndexHandler extends AbstractIndexHandler {
             org.apache.hadoop.hive.ql.metadata.Table indexTable,
             Set<ReadEntity> inputs, 
             Set<WriteEntity> outputs) throws HiveException {
-        LOG.warn("entered generate");
 
-        createMongoIndex(baseTable, index);
-        
-        LOG.warn("exited generate");
         return new ArrayList<Task<?>>();
     }
 
@@ -94,19 +98,31 @@ public class MongoIndexHandler extends AbstractIndexHandler {
         configuration = conf;
     }
 
-    private void createMongoIndex(Object baseTable, Index index) throws HiveException {
-        Map<String, String> tblParams;
-        if (baseTable instanceof org.apache.hadoop.hive.ql.metadata.Table) {
-            tblParams = ((org.apache.hadoop.hive.ql.metadata.Table) baseTable).getParameters();
-        } else {
-            tblParams = ((Table) baseTable).getParameters();
-        }
+    /**
+     * Given the index and baseTable, look to the MongoDB URI location to create
+     * the corresponding index in MongoDB as well
+     */
+    private void createMongoIndex(Table baseTable, Index index) throws HiveException {
+
+        Map<String, String> tblParams = baseTable.getParameters();
         String mongoURIStr = tblParams.get(MongoStorageHandler.MONGO_URI);
         DBCollection coll = MongoConfigUtil.getCollection(new MongoURI(mongoURIStr));
-        LOG.warn("got mongo collection");
-        
+
+        // Create a DBObject of each field and its order. Either 1 for ascending
+        // or -1 for descending. A BasicDBObjectBuilder preserves the order
+        BasicDBObjectBuilder builder = BasicDBObjectBuilder.start();
+        Map<String, String> idxParams = index.getParameters();
         for (FieldSchema schema : index.getSd().getCols()) {
-            coll.createIndex(new BasicDBObject(schema.getName(), 1));
+            String name = schema.getName();
+            String order = name + ".order";
+            BasicDBObject mongoIndex = new BasicDBObject();
+
+            if (idxParams.containsKey(order)) {
+                mongoIndex.put(name, Integer.parseInt(idxParams.get(order)));
+            } else {
+                mongoIndex.put(name, 1);
+            }
+            coll.createIndex(mongoIndex);
         }
     }
 
