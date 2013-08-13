@@ -24,11 +24,11 @@ import com.mongodb.DBCollection;
 import com.mongodb.MongoURI;
 import com.mongodb.hadoop.util.MongoConfigUtil;
 
-public class HiveMongoIndexHandler extends AbstractIndexHandler {
+public class MongoIndexHandler extends AbstractIndexHandler {
 
     private Configuration configuration;
     private static final Log LOG = LogFactory.getLog(
-            HiveMongoIndexHandler.class.getName());
+            MongoIndexHandler.class.getName());
     
     @Override
     public void analyzeIndexDefinition(Table baseTable, 
