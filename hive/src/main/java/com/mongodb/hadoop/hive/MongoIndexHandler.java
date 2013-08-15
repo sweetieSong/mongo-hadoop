@@ -6,10 +6,13 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 
+import static org.apache.hadoop.hive.metastore.api.hive_metastoreConstants.META_TABLE_STORAGE;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hive.metastore.api.*;
+import org.apache.hadoop.hive.metastore.TableType;
 import org.apache.hadoop.hive.ql.exec.Task;
 import org.apache.hadoop.hive.ql.hooks.ReadEntity;
 import org.apache.hadoop.hive.ql.hooks.WriteEntity;
@@ -20,6 +23,7 @@ import org.apache.hadoop.hive.ql.metadata.Partition;
 import org.apache.hadoop.hive.ql.parse.ParseContext;
 import org.apache.hadoop.hive.ql.plan.ExprNodeDesc;
 
+import com.mongodb.util.JSON;
 import com.mongodb.DBObject;
 import com.mongodb.BasicDBObject;
 import com.mongodb.BasicDBObjectBuilder;
@@ -34,8 +38,8 @@ import com.mongodb.hadoop.util.MongoConfigUtil;
 public class MongoIndexHandler extends AbstractIndexHandler {
 
     private Configuration configuration;
-    private static final Log LOG = LogFactory.getLog(
-            MongoIndexHandler.class.getName());
+    private static final Log LOG = LogFactory.getLog(MongoIndexHandler.class);
+    public static final String INDEX_ORDER = "indexOrder";
     
     @Override
     public void analyzeIndexDefinition(Table baseTable, 
@@ -45,6 +49,10 @@ public class MongoIndexHandler extends AbstractIndexHandler {
         if (!tblParams.containsKey(MongoStorageHandler.MONGO_URI)) {
             throw new HiveException("You must specify a 'mongo.uri' in TBLPROPERTIES");
         }
+        String mongoURI = tblParams.get(MongoStorageHandler.MONGO_URI);
+
+        // Each Table must have columns to begin with 
+        // See the native index handlers for this
         StorageDescriptor storageDesc = index.getSd();
         if (this.usesIndexTable() && indexTable != null) {
             StorageDescriptor indexTableSd = storageDesc.deepCopy();
@@ -56,7 +64,24 @@ public class MongoIndexHandler extends AbstractIndexHandler {
             indexTable.setSd(indexTableSd);
         }
 
-        createMongoIndex(baseTable, index);
+        // Pass the MongoDB indices created here to the index table to 
+        // drop in Mongodb when the Hive Table is dropped 
+        String indexOrder = createMongoIndex(baseTable, index);
+        Map<String, String> idxParams = indexTable.getParameters();
+        idxParams.put(INDEX_ORDER, indexOrder);
+
+        // Also need to pass in the MONGO_URI of the basetable, 
+        // else the index table doesn't know where to connect to
+        idxParams.put(MongoStorageHandler.MONGO_URI, mongoURI);
+
+        // We can also specify the StorageHandler for the table here
+        idxParams.put(META_TABLE_STORAGE
+                , "com.mongodb.hadoop.hive.MongoIndexStorageHandler");
+        indexTable.setParameters(idxParams);
+        
+        // Cannot drop index tables, need to set the TableType to something else 
+        // NOTE:: dropping an index does not trigger the Hooks
+        indexTable.setTableType(TableType.MANAGED_TABLE.toString());
     }
 
     /**
@@ -100,30 +125,42 @@ public class MongoIndexHandler extends AbstractIndexHandler {
 
     /**
      * Given the index and baseTable, look to the MongoDB URI location to create
-     * the corresponding index in MongoDB as well
+     * the corresponding index in MongoDB as well, return the serialized DBObject
+     * that contains all the DBObjects used in ensureIndex as values.
      */
-    private void createMongoIndex(Table baseTable, Index index) throws HiveException {
+    private String createMongoIndex(Table baseTable, Index index) throws HiveException {
 
+        // Get the collection from the MongoURI
         Map<String, String> tblParams = baseTable.getParameters();
         String mongoURIStr = tblParams.get(MongoStorageHandler.MONGO_URI);
         DBCollection coll = MongoConfigUtil.getCollection(new MongoURI(mongoURIStr));
 
-        // Create a DBObject of each field and its order. Either 1 for ascending
-        // or -1 for descending. A BasicDBObjectBuilder preserves the order
         BasicDBObjectBuilder builder = BasicDBObjectBuilder.start();
         Map<String, String> idxParams = index.getParameters();
+
+        BasicDBObject indexOrder = new BasicDBObject();
+        
+        // Create a DBObject of each field and its order. Either 1 for ascending
+        // or -1 for descending. This DBObject is used for ensureIndex 
         for (FieldSchema schema : index.getSd().getCols()) {
             String name = schema.getName();
-            String order = name + ".order";
+            String nameKey = name + ".order";
             BasicDBObject mongoIndex = new BasicDBObject();
 
-            if (idxParams.containsKey(order)) {
-                mongoIndex.put(name, Integer.parseInt(idxParams.get(order)));
-            } else {
-                mongoIndex.put(name, 1);
-            }
+            Integer order = 1;
+            // If there's a specified order, use it, else default to 1
+            if (idxParams.containsKey(nameKey)) {
+                order = Integer.parseInt(idxParams.get(nameKey));
+            } 
+            mongoIndex.put(name, order);
+            // Create the Index
             coll.createIndex(mongoIndex);
+            // Also put the DBObject into indexOrder, which will be passed back
+            indexOrder.put(name, mongoIndex);
         }
+        // Table Parameters is Map<String,String>, so return the MongoDB serialized
+        // DBObject
+        return JSON.serialize(indexOrder);
     }
 
 }
